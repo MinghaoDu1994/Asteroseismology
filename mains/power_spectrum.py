@@ -334,7 +334,7 @@ def Background_Fit(file_path: str, kicid:str, lc_type: str, dnu: float, numax: f
 		ndim, nwalkers = 5, 300
 		pos0 = [theta + 1e-4*np.random.randn(ndim) for i in range(nwalkers)]
 		sampler = emcee.EnsembleSampler(nwalkers, ndim, lnprob, args=(freq,power,fnyq))
-		nburn, nsteps = 200, 1000
+		nburn, nsteps = 200, 2000
 		width = 30
 		#result = sampler.sample(pos0, iterations=nburn, thin=10)
 		for j, result in enumerate(sampler.sample(pos0, iterations=nburn, thin=10)):
