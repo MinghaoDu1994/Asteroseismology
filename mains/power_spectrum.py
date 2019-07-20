@@ -150,9 +150,9 @@ def Super_Lorentz_Profile(freq, a, b):
 def Gauss_Profile(freq, height, fc, sigma):
 	return height * np.exp(-(freq - fc)**2 / (2.0*sigma**2.0))
 
-def Init_Bg_Model_Paras(freq, numax, teff):
+def Init_Bg_Model_Paras(freq, power, numax, teff):
 	index = np.intersect1d(np.argwhere(freq > 7000.0),np.argwhere(freq < 8000.0))
-	white_noise = np.median(index)
+	white_noise = np.median(power[index])
 	a_sun = 3.59 / 1.33
 	b1_sun = 758.0
 	b2_sun = 24698.0
@@ -165,13 +165,12 @@ def Init_Bg_Model_Paras(freq, numax, teff):
 	b1 = 0.317 * numax ** (0.970)
 	b2 = 0.948 * numax ** (0.992)
 
-	height = 3.49 * numax ** (-0.75) * teff * (3.5*0.75-2) / 
-	(se.numax_sun ** (-0.75) * se.teff_sun * (3.5*0.75-2))  # stello+ 2011
+	height = 3.49 * numax ** (-0.75) * teff * (3.5*0.75-2) / (se.numax_sun ** (-0.75) * se.teff_sun * (3.5*0.75-2))  # stello+ 2011
 	dnu_guess = (numax/3050)**0.77 * 135.1 # Stello+2009
 	sigma  = 2 * dnu_guess
 
 	prior = np.array([white_noise, a1, b1, a2, b2, height, numax, sigma])
-	#print(prior)
+	print(prior)
 	return prior
 
 def BackGround_Model(freq, paras, fnyq, slp_number=2, type='withgauss'):         ##kallinger 2014 
@@ -179,14 +178,14 @@ def BackGround_Model(freq, paras, fnyq, slp_number=2, type='withgauss'):        
 	power_white_noise = paras[0]
 	power_slp1 = Super_Lorentz_Profile(freq, paras[1], paras[2])
 	power_slp2 = Super_Lorentz_Profile(freq, paras[3], paras[4])
-	power_gauss = Gauss_Profile(freq, paras[5], paras[6], paras[7])
-
+	
 	if slp_number == 2:
 		power_slp = power_slp1 + power_slp2
 	elif slp_number == 1:
 		power_slp = power_slp1
 
 	if type == 'withgauss':
+		power_gauss = Gauss_Profile(freq, paras[5], paras[6], paras[7])
 		power = power_slp + power_gauss
 	elif type == 'withoutgauss':
 		power = power_slp
@@ -233,7 +232,7 @@ def Power_Spectrum_Kepler(file_path: str, kicid:str, period: float, lc_type: str
 		fnyq = 8496.35
 		fmax = fnyq / 1e6
 	elif lc_type == 'lc':
-		fnyq = 280.0
+		fnyq = 283.21
 		fmax = fnyq / 1e6
 
 	lc = np.loadtxt(file_path+se.sep+'Correct_LC.txt')
@@ -248,9 +247,9 @@ def Power_Spectrum_Kepler(file_path: str, kicid:str, period: float, lc_type: str
 	fmin = 1.0 / period * 11.57 / 1e6
 	res  = fmax / len(t)
 	freq = np.arange(fmin, fmax, res)
-	power = LombScargle(t, flux, flux_err).power(freq,normalization='psd')
+	power = LombScargle(t, flux).power(freq,normalization='psd')
 	freq *= 1e6
-	#power_o *= dt * 1e6
+	power *= dt * 1e6 # to psd
 
 	samplinginterval = np.median(freq[1:-1] - freq[0:-2])
 	power_smooth = SmoothWrapper(freq, power, period, "bartlett", samplinginterval)
@@ -269,7 +268,7 @@ def Background_Fit(file_path: str, kicid:str, lc_type: str, dnu: float, numax: f
 		fnyq = 8496.35
 		fmax = fnyq / 1e6
 	elif lc_type == 'lc':
-		fnyq = 280.0
+		fnyq = 283.21
 		fmax = fnyq / 1e6
 
 	data = np.loadtxt(file_path+se.sep+'%s.power' %kicid, delimiter=',')
@@ -278,13 +277,13 @@ def Background_Fit(file_path: str, kicid:str, lc_type: str, dnu: float, numax: f
 	period = dnu / 15.0
 	samplinginterval = np.median(freq[1:-1] - freq[0:-2])
 	power_smooth = SmoothWrapper(freq, power, period, "bartlett", samplinginterval)
-	bgparas_guess = Init_Bg_Model_Paras(freq, numax, teff)
+	bgparas_guess = Init_Bg_Model_Paras(freq, power_smooth, numax, teff)
 	
 	print('--- Fitting Background ---')
 	if ftype == 'LS':
 		
 		def residuals_bg(paras):
-			return power_o - BackGround_Model(freq, paras, fnyq, type='withoutgauss')
+			return power - BackGround_Model(freq, paras, fnyq, type='withoutgauss')
 		
 		bgpara, cov = leastsq(residuals_bg, bgparas_guess, maxfev=3000)
 		power_bg = BackGround_Model(freq, bgpara, fnyq, type='withoutgauss')
@@ -294,52 +293,68 @@ def Background_Fit(file_path: str, kicid:str, lc_type: str, dnu: float, numax: f
 	elif ftype == 'MC':
 		if os.path.exists(file_path+'%s_bg_ls.para' %kicid):
 			theta = np.loadtxt(file_path+'%s_bg_ls.para' %kicid)
-			theta = theta[:4]		
+			theta = theta[:5]		
 		else:
-			theta = bgparas_guess[:4]
+			theta = bgparas_guess[:5]
+			power_bg_ls = None
 
 
-		def lnlikelihood(theta, freq, power):
-			model = BackGround_Model(x, theta, fnyq, type='withoutgauss')
-			return -np.sum(np.log(model)+(power/model))	
+		def lnlikelihood(theta, freq, power, fnyq):
+			model = BackGround_Model(freq, theta, fnyq, slp_number=2, type='withoutgauss')
+			return - np.sum(np.log(model)+power/model)	
 		
 		def lnprior(theta):
-			w, a1, b1, a2, b2, height, numax, sigma = theta
+			w, a1, b1, a2, b2 = theta
 			w_l = bgparas_guess[0] * 0.5
 			w_u = bgparas_guess[0] * 1.5
-			a1_l, a1_u = 0, 100
-			a2_l, a2_u = 0, 100
-			b1_l = bgparas_guess[2] * 0.5
-			b1_u = bgparas_guess[2] * 1.5
-			b2_l = bgparas_guess[4] * 0.5
-			b2_u = bgparas_guess[4] * 1.5
+			# a1_l, a1_u = 0, 100
+			# a2_l, a2_u = 0, 100
+			a1_l = bgparas_guess[1] * 0.5#0.1
+			a1_u = bgparas_guess[1] * 1.5#10
+			a2_l = bgparas_guess[3] * 0.5#0.1
+			a2_u = bgparas_guess[3] * 1.5# 10
+			b1_l = bgparas_guess[2] * 0.5#0.1
+			b1_u = bgparas_guess[2] * 1.5# 10
+			b2_l = bgparas_guess[4] * 0.5#0.1
+			b2_u = bgparas_guess[4] * 1.5# 10
 
-			if w_l < w < w_u and a1_l < a1 < a1_u and a2_l < a2 < a2_u and b1_l < b1<b1_u and b2_l < b2 < b2_u :
+			if w_l < w < w_u and a1_l < a1 < a1_u and a2_l < a2 < a2_u and b1_l < b1 < b1_u and b2_l < b2 < b2_u :
 				return 0.0
 			else:
 				return -np.inf
 
-		def lnprob(theta, freq, power):
+		def lnprob(theta, freq, power, fnyq):
 			lpri = lnprior(theta)
 			if not np.isfinite(lpri):
 				return -np.inf
 			else:
-				return lpri + lnlikelihood(theta, freq, power)
+				return lpri + lnlikelihood(theta, freq, power, fnyq)
 
 		print('--- MCMC ---')
-		ndim, nwalkers = 5, 1000
+		ndim, nwalkers = 5, 300
 		pos0 = [theta + 1e-4*np.random.randn(ndim) for i in range(nwalkers)]
-		sampler = emceeEnsembleSampler(nwalkers, ndim, lnprob, args=(theta,freq,power))
-		nburn, nsteps = 200, 2000
-		result = sampler.sample(pos0, iterations=nburn)
-		pos, lnpost, lnlike = result
+		sampler = emcee.EnsembleSampler(nwalkers, ndim, lnprob, args=(freq,power,fnyq))
+		nburn, nsteps = 200, 1000
+		width = 30
+		#result = sampler.sample(pos0, iterations=nburn, thin=10)
+		for j, result in enumerate(sampler.sample(pos0, iterations=nburn, thin=10)):
+			n = int((width+1) * float(j) / nburn)
+			sys.stdout.write("\r[{0}{1}]".format('#' * n, ' ' * (width - n)))
+		sys.stdout.write("\n")
+
+		pos, lnpost, rstate = result
 		sampler.reset()
 
-		result = sampler.sample(pos, nsteps, lnprob0=lnpost, lnlike0=lnlike)
-		samples = sampler.chain[:,1000:,:].reshape((-1,ndim))
+		#result = sampler.sample(pos, nsteps, lnprob0=lnpost)
+		for j, result in enumerate(sampler.sample(pos, iterations=nsteps, lnprob0=lnpost)):
+				#pos, lnpost, rstate = result
+			n = int((width+1) * float(j) / nsteps)
+			sys.stdout.write("\r[{0}{1}]".format('#' * n, ' ' * (width - n)))
+		sys.stdout.write("\n")
+		samples = sampler.chain[:,nburn:,:].reshape((-1,ndim)) #.chain is of shape (nwalker, nsteps, ndim)
 
-		evidence = sampler.thermodynamic_integration_log_evidence()
-		np.savetxt(file_path+"evidence_h1_%s.txt" %kicid, evidence, delimiter=",", fmt=("%0.8f"), header="bayesian_evidence") 
+		# evidence = sampler.thermodynamic_integration_log_evidence()
+		# np.savetxt(file_path+"evidence_h1_%s.txt" %kicid, evidence, delimiter=",", fmt=("%0.8f"), header="bayesian_evidence") 
 
 		result_mcmc = np.array(list(map(lambda v: (v[1], v[2]-v[1], v[1]-v[0]),
 			zip(*np.percentile(samples, [16, 50, 84],axis=0)))))
@@ -347,12 +362,12 @@ def Background_Fit(file_path: str, kicid:str, lc_type: str, dnu: float, numax: f
 
 		label = ['w','a1','b1','a2','b2']
 		fig = corner.corner(samples, label=label, quantiles=(0.16,0.5,0.84), truths=result_mcmc[:,0])
-		fig.savefig(file_path+'corner_%s.txt' %kicid)
+		fig.savefig(file_path+'corner_%s.png' %kicid)
 		plt.close()                           
 
-		power_bg_ls = BackGround_Model(freq, theta, fnyq, slp_number=2, type='withgauss')
-		power_bg_mc = BackGround_Model(freq, result_mcmc, fnyq, slp_number=2, type='withgauss')
+		power_bg_ls = BackGround_Model(freq, theta, fnyq, slp_number=2, type='withoutgauss')
+		power_bg_mc = BackGround_Model(freq, result_mcmc[:,0], fnyq, slp_number=2, type='withoutgauss')
 
-		Plot_PS(file_path+'%s_power.png', freq, power, power_smooth, power_bg_ls, power_bg_mc, ptype = 'log')
+		Plot_PS(file_path+'%s_power.png' %kicid, freq, power, power_smooth, power_bg_ls, power_bg_mc, ptype = 'log')
 
 
