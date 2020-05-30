@@ -12,7 +12,7 @@ from scipy.optimize import leastsq
 import emcee
 import corner
 
-__all__ = ['Get_LC_Info', 'Data_Preparation', 'Power_Spectrum_Kepler', 'Background_Fit']
+__all__ = ['Get_LC_Info', 'Data_Preparation', 'Power_Spectrum_Kepler', 'Background_Fit', 'Power_Spectrum_S4tess']
 
 def Get_LC_Info(lc_path: str):
 
@@ -123,13 +123,15 @@ def Plot_Light_Curve(lc_path, o_data, c_data, quarters=None):
 	return print('--- Light Curve Plotted ---')
 
 	
-def Plot_PS(fp, freq, power, power_smooth=None, power_bg_ls=None, power_bg_mc=None,ptype = 'log'):
+def Plot_PS(fp, freq, power, power_smooth=None, power_bg_ls=None, power_bg_mc=None, xlim=None, ptype=None):
 	fig = plt.figure()
 	ax = fig.add_subplot(111)
 	ax.plot(freq, power, color='gray')
-	ax.plot(freq, power_smooth, color='black')
+	ax.plot(freq, power_smooth, color='red')
+	if xlim is not None:
+		ax.set_xlim((xlim[0],xlim[1]))
 	if power_bg_ls is not None:
-		ax.plot(freq, power_bg_ls, color='red')
+		ax.plot(freq, power_bg_ls, color='blue')
 	if power_bg_mc is not None:
 		ax.plot(freq, power_bg_mc, color='green')
 	if ptype == 'log':
@@ -150,8 +152,11 @@ def Super_Lorentz_Profile(freq, a, b):
 def Gauss_Profile(freq, height, fc, sigma):
 	return height * np.exp(-(freq - fc)**2 / (2.0*sigma**2.0))
 
-def Init_Bg_Model_Paras(freq, power, numax, teff):
-	index = np.intersect1d(np.argwhere(freq > 7000.0),np.argwhere(freq < 8000.0))
+def Init_Bg_Model_Paras(freq, power, numax, teff, lc_type):
+	if lc_type == 'sc':
+		index = np.intersect1d(np.argwhere(freq > 7000.0),np.argwhere(freq < 8000.0))
+	elif lc_type == 'lc':
+		index = np.intersect1d(np.argwhere(freq > 270.0),np.argwhere(freq < 280.0))
 	white_noise = np.median(power[index])
 	a_sun = 3.59 / 1.33
 	b1_sun = 758.0
@@ -255,10 +260,75 @@ def Power_Spectrum_Kepler(file_path: str, kicid:str, period: float, lc_type: str
 	power_smooth = SmoothWrapper(freq, power, period, "bartlett", samplinginterval)
 	if plotflag == True:
 		Plot_PS(file_path+'%s_power.png' %kicid, 
-			freq, power, power_smooth, power_bg_ls, power_bg_mc=None, ptype='log')
+			freq, power, power_smooth, power_bg_ls, power_bg_mc=None, xlim=None, ptype='log')
 
 	ascii.write([freq, power], file_path+'%s.power' %kicid,
 		format="no_header",delimiter=",",overwrite=True)
+
+def wgn(x, snr):
+    Ps = np.sum(abs(x)**2)/len(x)
+    Pn = Ps/(10**((snr/10)))
+    noise = np.random.chisquare(2,len(x)) * np.sqrt(Pn)
+    signal_add_noise = x + noise
+    return signal_add_noise
+
+
+def Power_Spectrum_S4tess(fp: str, id_: str, lc: float, period: float, parameter: float, snr: float, plotflag: bool=False):
+
+	psfig_path = fp + '/psfig'
+	ps_path = fp + '/ps'
+	dnu, numax, teff, gran_sig, gran_tau = parameter
+	fnyq = 4166.67
+	fmax = fnyq / 1e6
+
+	t = lc['TIME']
+	t = t * 24.0 * 3600.0
+	flux = lc['FLUX']
+	#flux_noise = flux * np.random.randn(len(flux))
+	#flux_noise = wgn(flux, snr=2)
+	#flux_noise = Add_noise(flux, noise, snr=2)
+	#flux_err = lc[:,2] 
+	dt = np.median(t[1:] - t[:-1])
+	#time_bin = np.median(dt)
+	
+	fmin = 1.0 / period * 11.57 / 1e6
+	res  = fmax / len(t)
+	freq = np.arange(fmin, fmax, res)
+	freq *= 1e6
+	p_gran = (4 * gran_sig**2 * gran_tau) / (1+(2*np.pi*freq*gran_tau)**2)	
+	samplinginterval = np.median(freq[1:-1] - freq[0:-2])
+	index = (freq > numax*0.5) & (freq < numax*1.5)
+	freq_cut = freq[index]
+
+
+	power = LombScargle(t, flux).power(freq,normalization='psd')
+	power *= dt * 1e6 # to psd
+	power = power - p_gran
+	power_cut = power[index]
+	power_smooth = SmoothWrapper(freq, power, period, "bartlett", samplinginterval)
+	power_smooth_cut = power_smooth[index]
+
+	power_noise = wgn(power,snr)
+	power_noise *= dt * 1e6
+	power_noise = power_noise - p_gran
+	power_noise_smooth = SmoothWrapper(freq, power_noise, period, "bartlett", samplinginterval)	
+	power_noise_cut = power_noise[index]
+	power_noise_smooth_cut = power_noise_smooth[index]
+
+	# if plotflag == True:
+	# 	Plot_PS(psfig_path+'/%s_power1.png' %id_, 
+	# 		freq_cut, power_cut, power_smooth_cut, )#xlim=[numax*0.5,numax*1.5])
+
+	# ascii.write([freq_cut, power_cut, power_smooth_cut], ps_path+'/%s.power' %id_,
+	# 	format="no_header",delimiter=",",overwrite=True)
+	if plotflag == True:
+		Plot_PS(psfig_path+'/%s_power1.png' %id_, 
+			freq_cut, power_noise_cut, power_noise_smooth_cut, )#xlim=[numax*0.5,numax*1.5])
+
+	ascii.write([freq_cut, power_noise_cut, power_noise_smooth_cut], ps_path+'/%s.power' %id_,
+		format="no_header",delimiter=",",overwrite=True)
+
+
 
 def Background_Fit(file_path: str, kicid:str, lc_type: str, dnu: float, numax: float, teff: float, 
 	ftype: str):
@@ -271,13 +341,13 @@ def Background_Fit(file_path: str, kicid:str, lc_type: str, dnu: float, numax: f
 		fnyq = 283.21
 		fmax = fnyq / 1e6
 
-	data = np.loadtxt(file_path+se.sep+'%s.power' %kicid, delimiter=',')
+	data = np.loadtxt(file_path+se.sep+'%s.power' %kicid, comments='#' )#delimiter=',')
 	freq = data[:,0]
 	power = data[:,1]
 	period = dnu / 15.0
 	samplinginterval = np.median(freq[1:-1] - freq[0:-2])
 	power_smooth = SmoothWrapper(freq, power, period, "bartlett", samplinginterval)
-	bgparas_guess = Init_Bg_Model_Paras(freq, power_smooth, numax, teff)
+	bgparas_guess = Init_Bg_Model_Paras(freq, power_smooth, numax, teff, lc_type)
 	
 	print('--- Fitting Background ---')
 	if ftype == 'LS':
@@ -369,5 +439,6 @@ def Background_Fit(file_path: str, kicid:str, lc_type: str, dnu: float, numax: f
 		power_bg_mc = BackGround_Model(freq, result_mcmc[:,0], fnyq, slp_number=2, type='withoutgauss')
 
 		Plot_PS(file_path+'%s_power.png' %kicid, freq, power, power_smooth, power_bg_ls, power_bg_mc, ptype = 'log')
-
+		xx = power - power_bg_mc
+		np.savetxt('./ps_without_bg.power', xx)
 
